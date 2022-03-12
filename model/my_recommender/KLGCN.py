@@ -78,16 +78,14 @@ class KLGCN(AbstractRecommender):
             raise Exception("Unknown aggregator: " + self.aggregator)
 
     def get_constraint_mat(self):
-
-        user_deg = np.array(adj.sum(axis=1)).flatten()  # np.sum(adj, axis=1).reshape(-1)
-        item_deg = np.array(adj.sum(axis=0)).flatten()  # np.sum(adj, axis=0).reshape(-1)
+        user_deg = np.array(self.norm_adj.sum(axis=1)).flatten()  # np.sum(adj, axis=1).reshape(-1)
+        item_deg = np.array(self.norm_adj.sum(axis=0)).flatten()  # np.sum(adj, axis=0).reshape(-1)
 
         beta_user_deg = (np.sqrt(user_deg + 1) / user_deg).reshape(-1, 1)
         beta_item_deg = (1 / np.sqrt(item_deg + 1)).reshape(1, -1)
 
         constraint_mat = beta_user_deg @ beta_item_deg  # n_user * m_item
         constraint_mat = np.array(constraint_mat, dtype=np.float32)
-
         return constraint_mat
 
     @timer
@@ -367,11 +365,19 @@ class KLGCN(AbstractRecommender):
             for aggregator in self.aggregators:
                 regularizer = regularizer + l2_loss(aggregator.weights)
 
-        # batch_user_weights = tf.gather(self.norm_adj, self.batch_size)
-        # pos_weights = tf.gather(batch_user_weights, batch_item_indices, batch_dims=1)
-        # neg_weights = tf.gather(batch_user_weights, batch_neg_item_indices, batch_dims=1)
-        mf_loss = tf.reduce_sum(log_loss(pos_scores - neg_scores))
-        # mf_loss = pos_scores * (1e-6 + pos_weights) + tf.reduce_mean(neg_scores * (1e-6 + neg_weights), axis=1) * 300
+        batch_user_weights = tf.gather(self.norm_adj, self.users)
+        pos_weights = tf.gather(batch_user_weights, self.pos_items, batch_dims=1)
+        neg_weights = tf.gather(batch_user_weights, self.neg_items, batch_dims=1);q
+        q
+        pos_losses = tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=pos_scores,
+            labels=tf.ones_like(pos_scores)
+        )
+        neg_losses = tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=pos_scores,
+            labels=tf.zeros_like(pos_scores)
+        )
+        mf_loss = pos_losses * (1e-6 + pos_weights) + tf.reduce_mean(neg_losses * (1e-6 + neg_weights), axis=1) * 300
         ctr_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=scores))
 
         emb_loss = self.reg * regularizer
