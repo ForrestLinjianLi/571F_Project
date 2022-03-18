@@ -86,11 +86,7 @@ class KLGCN(AbstractRecommender):
 
         constraint_mat = beta_user_deg @ beta_item_deg  # n_user * m_item
         constraint_mat = np.array(constraint_mat, dtype=np.float32)
-        # constraint_mat = {
-        #     'beta_u': tf.convert_to_tensor(beta_user_deg),
-        #     'beta_i': tf.convert_to_tensor(beta_item_deg)
-        # }
-        return constraint_mat
+        return tf.Variable(constraint_mat, trainable=False)
 
     @timer
     def create_adj_mat(self, adj_type):
@@ -390,8 +386,8 @@ class KLGCN(AbstractRecommender):
             labels=tf.ones_like(pos_scores)
         )
         neg_losses = tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=pos_scores,
-            labels=tf.zeros_like(pos_scores)
+            logits=neg_scores,
+            labels=tf.zeros_like(neg_scores)
         )
         mf_loss = tf.reduce_sum(pos_losses * (1e-6 + pos_weights) + neg_losses * (1e-6 + neg_weights))
         ctr_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=scores))
