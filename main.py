@@ -9,6 +9,7 @@ from util import Configurator, tool
 np.random.seed(222)
 random.seed(222)
 tf.set_random_seed(222)
+# tf.random.set_seed(222)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 if __name__ == "__main__":

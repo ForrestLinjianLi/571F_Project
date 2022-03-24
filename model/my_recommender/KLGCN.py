@@ -138,7 +138,7 @@ class KLGCN(AbstractRecommender):
 
         self.users = tf.placeholder(tf.int32, shape=(None,))
         self.pos_items = tf.placeholder(tf.int32, shape=(None,))
-        self.neg_items = tf.placeholder(tf.int32, shape=(None,))
+        self.neg_items = tf.placeholder(tf.int32, shape=(None, ))
         self.labels = tf.placeholder(tf.float32, shape=(None,))
 
         self.weights = dict()
@@ -268,6 +268,7 @@ class KLGCN(AbstractRecommender):
         return tf.SparseTensor(indices, coo.data, coo.shape)
 
     def _create_kgcn_embed(self):
+        # neg_items = self.neg_items[:, 0]
         if self.add_user:
             pos_i_indices, neg_i_indices = self.pos_items + self.n_users, self.neg_items + self.n_users
         else:
@@ -344,10 +345,13 @@ class KLGCN(AbstractRecommender):
         return res, aggregators
 
     def create_bpr_loss(self):
+        batch_neg_item_indices = tf.random.uniform(shape=[tf.shape(self.users)[0], 800], maxval=self.n_items,
+                                                   dtype=tf.int64)
         pos_logits_u = inner_product(self.u_g_embeddings, self.pos_i_g_embeddings)
-        neg_logits_u = inner_product(self.u_g_embeddings, self.neg_i_g_embeddings)
+        # neg_logits_u = inner_product(self.u_g_embeddings, self.neg_i_g_embeddings)
+        neg_logits_u = tf.reduce_sum((self.u_g_embeddings * batch_neg_item_indices), axis=-1)
         self.pos_scores = inner_product(self.user_embeddings, self.pos_item_embeddings)
-        self.neg_scores = inner_product(self.user_embeddings, self.neg_item_embeddings)
+        self.neg_scores = inner_product(self.user_embeddings, tf.reduce_mean(self.neg_item_embeddings, axis=1))
         pos_logits_u = tf.nn.sigmoid_cross_entropy_with_logits(
             logits=pos_logits_u,
             labels=tf.ones_like(pos_logits_u)
@@ -369,30 +373,13 @@ class KLGCN(AbstractRecommender):
 
         batch_user_weights = tf.gather(self.constraint_mat, self.users)
         pos_weights = tf.gather(batch_user_weights, self.pos_items, batch_dims=-1)
-        neg_weights = tf.gather(batch_user_weights, self.neg_items, batch_dims=-1)
+        neg_weights = tf.gather(batch_user_weights, batch_neg_item_indices, batch_dims=-1)
         mf_loss = pos_logits_u * (1e-6 + pos_weights) + tf.reduce_mean(neg_logits_u * (1e-6 + neg_weights), axis=1) * 300 + tf.reduce_sum(log_loss(self.pos_scores - self.neg_scores))
         # mf_loss = pos_logits_u * (1e-6 + pos_weights) + tf.reduce_mean(neg_logits_u * (1e-6 + neg_weights), axis=1) * 300
         ctr_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=scores))
         emb_loss = self.reg * regularizer
 
         return tf.reduce_sum(mf_loss), ctr_loss, emb_loss
-
-    # def create_bpr_loss(self, pos_scores, neg_scores):
-    #     scores = tf.concat([pos_scores, neg_scores], axis=0)
-    #
-    #     regularizer = l2_loss(self.weights['user_embedding'], self.weights['item_embedding'],
-    #                           self.weights['entity_embedding'], self.weights['relation_embedding'])
-    #
-    #     if self.feature_transform:
-    #         for aggregator in self.aggregators:
-    #             regularizer = regularizer + l2_loss(aggregator.weights)
-    #
-    #     mf_loss = tf.reduce_sum(log_loss(pos_scores - neg_scores))
-    #     ctr_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=scores))
-    #
-    #     emb_loss = self.reg * regularizer
-    #
-    #     return mf_loss, ctr_loss, emb_loss
 
     def train_model(self):
     
@@ -455,7 +442,8 @@ class KLGCN(AbstractRecommender):
                 items = all_items[start: start + self.batch_size]
                 feed_dict = {self.users: [user] * len(items),
                              self.pos_items: items,
-                             self.neg_items: items}
+                             self.neg_items: items,}
+                             # self.neg_items: np.expand_dims(np.array(items), axis=1),}
 
                 batch_ratings = self.sess.run(self.pos_scores, feed_dict=feed_dict)
                 ratings[idx][start: start + self.batch_size] = batch_ratings
