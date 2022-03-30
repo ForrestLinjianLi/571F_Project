@@ -79,8 +79,10 @@ class KLGCN(AbstractRecommender):
 
     def get_constraint_mat(self):
         user_list, item_list = self.dataset.get_train_interactions()
-        row = np.array(user_list, dtype=np.int32)
-        col = np.array(item_list, dtype=np.int32)
+
+        row = np.array(user_list, dtype=np.float32)
+        col = np.array(item_list, dtype=np.float32)
+
         adj = sp.csr_matrix((np.ones_like(row, dtype=np.float32), (row, col)), shape=[self.n_users, self.n_items])
         user_deg = np.array(adj.sum(axis=1)).flatten()  # np.sum(adj, axis=1).reshape(-1)
         item_deg = np.array(adj.sum(axis=0)).flatten()  # np.sum(adj, axis=0).reshape(-1)
@@ -88,9 +90,10 @@ class KLGCN(AbstractRecommender):
         beta_user_deg = (np.sqrt(user_deg + 1) / user_deg).reshape(-1, 1)
         beta_item_deg = (1 / np.sqrt(item_deg + 1)).reshape(1, -1)
 
-        constraint_mat = beta_user_deg * beta_item_deg  # n_user * m_item
+        constraint_mat = beta_user_deg @ beta_item_deg  # n_user * m_item
         constraint_mat = np.array(constraint_mat, dtype=np.float32)
-        return tf.Variable(constraint_mat, trainable=False)
+
+        return constraint_mat
 
 
     @timer
@@ -143,7 +146,7 @@ class KLGCN(AbstractRecommender):
 
         self.users = tf.placeholder(tf.int32, shape=(None,))
         self.pos_items = tf.placeholder(tf.int32, shape=(None,))
-        self.neg_items = tf.placeholder(tf.int32, shape=(None, ))
+        self.neg_items = tf.placeholder(tf.int32, shape=(None,))
         self.labels = tf.placeholder(tf.float32, shape=(None,))
 
         self.weights = dict()
@@ -351,38 +354,40 @@ class KLGCN(AbstractRecommender):
         return res, aggregators
 
     def create_bpr_loss(self):
-        batch_neg_item_indices = tf.random.uniform(shape=[tf.shape(self.users)[0], 800], maxval=self.n_items,
-                                                   dtype=tf.int64)
-        batch_neg_item_embeddings = tf.squeeze(tf.nn.embedding_lookup(self.ia_embeddings, batch_neg_item_indices), axis=2)
-        pos_logits_u = inner_product(self.u_g_embeddings, self.pos_i_g_embeddings)
-        # neg_logits_u = inner_product(self.u_g_embeddings, self.neg_i_g_embeddings)
-        neg_logits_u = tf.reduce_sum(tf.expand_dims(self.u_g_embeddings, axis=1) * batch_neg_item_embeddings, axis=-1)
-        self.pos_scores = inner_product(self.user_embeddings, self.pos_item_embeddings)
-        self.neg_scores = inner_product(self.user_embeddings, self.neg_item_embeddings)
-        pos_logits_u = tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=pos_logits_u,
-            labels=tf.ones_like(pos_logits_u)
-        )
-        neg_logits_u = tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=neg_logits_u,
-            labels=tf.zeros_like(neg_logits_u)
-        )
-        self.pos_score_normalized = tf.sigmoid(self.pos_scores)
-        self.neg_score_normalized = tf.sigmoid(self.neg_scores)
-        scores = tf.concat([self.pos_scores, self.neg_scores], axis=0)
-
-        regularizer = l2_loss(self.weights['user_embedding'], self.weights['item_embedding'],
-                              self.weights['entity_embedding'], self.weights['relation_embedding'])
-
-        if self.feature_transform:
-            for aggregator in self.aggregators:
-                regularizer = regularizer + l2_loss(aggregator.weights)
+        batch_neg_item_indices = tf.random.uniform(shape=[tf.shape(self.users)[0], 800], maxval=self.n_items, dtype=tf.int64)
 
         batch_user_weights = tf.gather(self.constraint_mat, self.users)
         pos_weights = tf.gather(batch_user_weights, self.pos_items, batch_dims=-1)
         neg_weights = tf.gather(batch_user_weights, batch_neg_item_indices, batch_dims=-1)
-        mf_loss = pos_logits_u * (1e-6 + pos_weights) + tf.reduce_mean(neg_logits_u * (1e-6 + neg_weights), axis=1) * 300 + tf.reduce_sum(log_loss(self.pos_scores - self.neg_scores))
+
+        embedded_neg_items = tf.squeeze(tf.nn.embedding_lookup(self.ia_embeddings, batch_neg_item_indices), axis=2)
+        pos_logits = tf.reduce_sum(self.u_g_embeddings * self.pos_i_g_embeddings, axis=-1)
+        neg_logits = tf.reduce_sum((tf.expand_dims(self.u_g_embeddings, axis=1) * embedded_neg_items), axis=-1)
+
+        pos_losses = tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=pos_logits,
+            labels=tf.ones_like(pos_logits)
+        )
+        neg_losses = tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=neg_logits,
+            labels=tf.zeros_like(neg_logits)
+        )
+
         # mf_loss = pos_logits_u * (1e-6 + pos_weights) + tf.reduce_mean(neg_logits_u * (1e-6 + neg_weights), axis=1) * 300
+        mf_loss = pos_losses * (1e-6 + pos_weights) + tf.reduce_mean(neg_losses * (1e-6 + neg_weights), axis=1) * 300 + tf.reduce_sum(log_loss(self.pos_scores - self.neg_scores))
+
+        self.pos_scores = inner_product(self.user_embeddings, self.pos_item_embeddings)
+        self.neg_scores = inner_product(self.user_embeddings, self.neg_item_embeddings)
+        self.pos_score_normalized = tf.sigmoid(self.pos_scores)
+        self.neg_score_normalized = tf.sigmoid(self.neg_scores)
+        scores = tf.concat([self.pos_scores, self.neg_scores], axis=0)
+        if self.feature_transform:
+            for aggregator in self.aggregators:
+                regularizer = regularizer + l2_loss(aggregator.weights)
+
+        regularizer = l2_loss(self.weights['user_embedding'], self.weights['item_embedding'],
+                              self.weights['entity_embedding'], self.weights['relation_embedding'])
+
         ctr_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=scores))
         emb_loss = self.reg * regularizer
 
