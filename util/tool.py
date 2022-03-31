@@ -228,16 +228,16 @@ def log_loss(yij, name="log_loss"):
     """ bpr loss
     """
     with tf.name_scope(name):
-        return -tf.log_sigmoid(yij)
+        return -tf.compat.v1.log_sigmoid(yij)
 
 
 def dropout_sparse(tf_sp_mat, keep_prob, nnz):
     """Dropout for sparse tensors.
     """
     noise_shape = [nnz]
-    random_tensor = tf.random_uniform(noise_shape) + keep_prob
+    random_tensor = tf.compat.v1.random_uniform(noise_shape) + keep_prob
     dropout_mask = tf.cast(tf.floor(random_tensor), dtype=tf.bool)
-    pre_out = tf.sparse_retain(tf_sp_mat, dropout_mask)
+    pre_out = tf.compat.v1.sparse_retain(tf_sp_mat, dropout_mask)
     scale = 1.0 / keep_prob
     return pre_out * scale
 

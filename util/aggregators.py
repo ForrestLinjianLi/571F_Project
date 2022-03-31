@@ -55,16 +55,16 @@ class Aggregator(object):
             self_relation_scores = tf.reduce_sum(self_vectors * neighbor_relations, axis=-1)
             self_neighbor_scores = tf.reduce_sum(self_vectors * neighbor_vectors, axis=-1)
             if self.att_type == 'ur':
-                user_relation_scores_normalized = tf.nn.softmax(user_relation_scores, dim=-1)
+                user_relation_scores_normalized = tf.nn.softmax(user_relation_scores, axis=-1)
             elif self.att_type == 'cr':
-                user_relation_scores_normalized = tf.nn.softmax(self_relation_scores, dim=-1)
+                user_relation_scores_normalized = tf.nn.softmax(self_relation_scores, axis=-1)
             elif self.att_type == 'ur+cr':
-                user_relation_scores_normalized = tf.nn.softmax(user_relation_scores + self_relation_scores, dim=-1)
+                user_relation_scores_normalized = tf.nn.softmax(user_relation_scores + self_relation_scores, axis=-1)
             elif self.att_type == 'ur+cn':
-                user_relation_scores_normalized = tf.nn.softmax(user_relation_scores + self_neighbor_scores, dim=-1)
+                user_relation_scores_normalized = tf.nn.softmax(user_relation_scores + self_neighbor_scores, axis=-1)
             elif self.att_type == 'ur+cr+cn':
                 user_relation_scores_normalized = tf.nn.softmax(user_relation_scores + self_relation_scores +
-                                                                self_neighbor_scores, dim=-1)
+                                                                self_neighbor_scores, axis=-1)
             else:
                 raise Exception("Unknown attention type: " + self.att_type)
 
@@ -88,17 +88,17 @@ class SumAggregator(Aggregator):
     def __init__(self, n_neighbor, batch_size, dim, dropout=0., act=tf.nn.relu, feature_transform=True, activation=True, att_type='ur', name=None, agg=None):
         super(SumAggregator, self).__init__(n_neighbor, batch_size, dim, dropout, act, feature_transform, activation, att_type, name, agg)
 
-        with tf.variable_scope(self.name):
-            self.weights = tf.get_variable(
-                shape=[self.dim, self.dim], initializer=tf.contrib.layers.xavier_initializer(), name='weights')
-            self.bias = tf.get_variable(shape=[self.dim], initializer=tf.zeros_initializer(), name='bias')
+        with tf.compat.v1.variable_scope(self.name):
+            self.weights = tf.compat.v1.get_variable(
+                shape=[self.dim, self.dim], initializer=tf.initializers.GlorotUniform(), name='weights')
+            self.bias = tf.compat.v1.get_variable(shape=[self.dim], initializer=tf.zeros_initializer(), name='bias')
 
     def _call(self, self_vectors, neighbor_vectors, neighbor_relations, user_embeddings, masks=None):
         # [batch_size, -1, dim]
         neighbors_agg = self._mix_neighbor_vectors(self_vectors, neighbor_vectors, neighbor_relations, user_embeddings)
 
         output = tf.reshape(self_vectors + neighbors_agg, [-1, self.dim])
-        output = tf.nn.dropout(output, keep_prob=1-self.dropout)
+        output = tf.nn.dropout(output, self.dropout)
         if self.feature_transform:
             output = tf.matmul(output, self.weights) + self.bias
         else:
@@ -117,10 +117,10 @@ class ConcatAggregator(Aggregator):
     def __init__(self, n_neighbor, batch_size, dim, dropout=0., act=tf.nn.relu, feature_transform=True, activation=True, att_type='ur', name=None, agg=None):
         super(ConcatAggregator, self).__init__(n_neighbor, batch_size, dim, dropout, act, feature_transform, activation, att_type, name, agg)
 
-        with tf.variable_scope(self.name):
-            self.weights = tf.get_variable(
-                shape=[self.dim * 2, self.dim], initializer=tf.contrib.layers.xavier_initializer(), name='weights')
-            self.bias = tf.get_variable(shape=[self.dim], initializer=tf.zeros_initializer(), name='bias')
+        with tf.compat.v1.variable_scope(self.name):
+            self.weights = tf.compat.v1.get_variable(
+                shape=[self.dim * 2, self.dim], initializer=tf.initializers.GlorotUniform(), name='weights')
+            self.bias = tf.compat.v1.get_variable(shape=[self.dim], initializer=tf.zeros_initializer(), name='bias')
 
     def _call(self, self_vectors, neighbor_vectors, neighbor_relations, user_embeddings, masks):
         # [batch_size, -1, dim]
@@ -151,10 +151,10 @@ class NeighborAggregator(Aggregator):
     def __init__(self, n_neighbor, batch_size, dim, dropout=0., act=tf.nn.relu, feature_transform=True, activation=True, att_type='ur', name=None, agg=None):
         super(NeighborAggregator, self).__init__(n_neighbor, batch_size, dim, dropout, act, feature_transform, activation, att_type, name, agg)
 
-        with tf.variable_scope(self.name):
-            self.weights = tf.get_variable(
-                shape=[self.dim, self.dim], initializer=tf.contrib.layers.xavier_initializer(), name='weights')
-            self.bias = tf.get_variable(shape=[self.dim], initializer=tf.zeros_initializer(), name='bias')
+        with tf.compat.v1.variable_scope(self.name):
+            self.weights = tf.compat.v1.get_variable(
+                shape=[self.dim, self.dim], initializer=tf.initializers.GlorotUniform(), name='weights')
+            self.bias = tf.compat.v1.get_variable(shape=[self.dim], initializer=tf.zeros_initializer(), name='bias')
 
     def _call(self, self_vectors, neighbor_vectors, neighbor_relations, user_embeddings, masks):
         # [batch_size, -1, dim]
@@ -181,10 +181,10 @@ class TopAggregator(Aggregator):
     def __init__(self, n_neighbor, batch_size, dim, dropout=0., act=tf.nn.relu, feature_transform=True, activation=True, att_type='ur', name=None, agg=None):
         super(TopAggregator, self).__init__(n_neighbor, batch_size, dim, dropout, act, feature_transform, activation, att_type, name, agg)
 
-        with tf.variable_scope(self.name):
-            self.weights = tf.get_variable(
-                shape=[self.dim, self.dim], initializer=tf.contrib.layers.xavier_initializer(), name='weights')
-            self.bias = tf.get_variable(shape=[self.dim], initializer=tf.zeros_initializer(), name='bias')
+        with tf.compat.v1.variable_scope(self.name):
+            self.weights = tf.compat.v1.get_variable(
+                shape=[self.dim, self.dim], initializer=tf.initializers.GlorotUniform(), name='weights')
+            self.bias = tf.compat.v1.get_variable(shape=[self.dim], initializer=tf.zeros_initializer(), name='bias')
 
     def _call(self, self_vectors, neighbor_vectors, neighbor_relations, user_embeddings, masks):
         neighbors_agg = self._mix_neighbor_vectors(self_vectors, neighbor_vectors, neighbor_relations, user_embeddings)
@@ -245,10 +245,10 @@ class DiAggregator(Aggregator):
     def __init__(self, n_neighbor, batch_size, dim, dropout=0., act=tf.nn.relu, feature_transform=True, activation=True, att_type='ur', name=None, agg=None):
         super(DiAggregator, self).__init__(n_neighbor, batch_size, dim, dropout, act, feature_transform, activation, att_type, name, agg)
 
-        with tf.variable_scope(self.name):
-            self.weights = tf.get_variable(
-                shape=[self.dim, self.dim], initializer=tf.contrib.layers.xavier_initializer(), name='weights')
-            self.bias = tf.get_variable(shape=[self.dim], initializer=tf.zeros_initializer(), name='bias')
+        with tf.compat.v1.variable_scope(self.name):
+            self.weights = tf.compat.v1.get_variable(
+                shape=[self.dim, self.dim], initializer=tf.initializers.GlorotUniform(), name='weights')
+            self.bias = tf.compat.v1.get_variable(shape=[self.dim], initializer=tf.zeros_initializer(), name='bias')
 
     def _call(self, self_vectors, neighbor_vectors, neighbor_relations, user_embeddings, masks):
         # [batch_size, -1, dim]

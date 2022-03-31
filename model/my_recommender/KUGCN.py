@@ -56,13 +56,14 @@ class KLGCN(AbstractRecommender):
         else:
             self.test_users = test_users
 
-        self.norm_adj = self.create_adj_mat(config['adj_type'])
+        self.norm_adj, self.adj_mat = self.create_adj_mat(config['adj_type'])
         self.sess = sess
 
         self.n_entities, self.n_relations, kg = self.dataset.get_kg(config, self.user_pos_train, add_user=self.add_user,
                                                                     reverse=self.reverse)
         self.adj_entity, self.adj_relation = self.dataset.get_adj(kg, self.n_neighbors, self.n_entities,
                                                                   add_user=self.add_user)
+        self.constraint_mat = self.get_constraint_mat()
         if self.aggregator == 'sum':
             self.aggregator_class = SumAggregator
         elif self.aggregator == 'concat':
@@ -76,6 +77,25 @@ class KLGCN(AbstractRecommender):
         else:
             raise Exception("Unknown aggregator: " + self.aggregator)
 
+    def get_constraint_mat(self):
+        user_list, item_list = self.dataset.get_train_interactions()
+
+        row = np.array(user_list, dtype=np.float32)
+        col = np.array(item_list, dtype=np.float32)
+
+        adj = sp.csr_matrix((np.ones_like(row, dtype=np.float32), (row, col)), shape=[self.n_users, self.n_items])
+        user_deg = np.array(adj.sum(axis=1)).flatten()  # np.sum(adj, axis=1).reshape(-1)
+        item_deg = np.array(adj.sum(axis=0)).flatten()  # np.sum(adj, axis=0).reshape(-1)
+
+        beta_user_deg = (np.sqrt(user_deg + 1) / user_deg).reshape(-1, 1)
+        beta_item_deg = (1 / np.sqrt(item_deg + 1)).reshape(1, -1)
+
+        constraint_mat = beta_user_deg @ beta_item_deg  # n_user * m_item
+        constraint_mat = np.array(constraint_mat, dtype=np.float32)
+
+        return constraint_mat
+
+
     @timer
     def create_adj_mat(self, adj_type):
         user_list, item_list = self.dataset.get_train_interactions()
@@ -83,7 +103,7 @@ class KLGCN(AbstractRecommender):
         item_np = np.array(item_list, dtype=np.int32)
         ratings = np.ones_like(user_np, dtype=np.float32)
         n_nodes = self.n_users + self.n_items
-        tmp_adj = sp.csr_matrix((ratings, (user_np, item_np + self.n_users)), shape=(n_nodes, n_nodes))
+        tmp_adj = sp.csr_matrix((ratings, (user_np, item_np+self.n_users)), shape=(n_nodes, n_nodes))
         adj_mat = tmp_adj + tmp_adj.T
 
         def normalized_adj_single(adj):
@@ -120,17 +140,17 @@ class KLGCN(AbstractRecommender):
             adj_matrix = mean_adj + sp.eye(mean_adj.shape[0])
             print('use the mean adjacency matrix')
 
-        return adj_matrix
+        return adj_matrix, adj_mat
 
     def _create_variable(self):
 
-        self.users = tf.compat.v1.placeholder(tf.int32, shape=(None,))
-        self.pos_items = tf.compat.v1.placeholder(tf.int32, shape=(None,))
-        self.neg_items = tf.compat.v1.placeholder(tf.int32, shape=(None,))
-        self.labels = tf.compat.v1.placeholder(tf.float32, shape=(None,))
+        self.users = tf.placeholder(tf.int32, shape=(None,))
+        self.pos_items = tf.placeholder(tf.int32, shape=(None,))
+        self.neg_items = tf.placeholder(tf.int32, shape=(None,))
+        self.labels = tf.placeholder(tf.float32, shape=(None,))
 
         self.weights = dict()
-        initializer = tf.initializers.GlorotUniform()
+        initializer = tf.contrib.layers.xavier_initializer()
         self.weights['user_embedding'] = tf.Variable(initializer([self.n_users, self.emb_dim]), name='user_embedding')
         self.weights['item_embedding'] = tf.Variable(initializer([self.n_items, self.emb_dim]), name='item_embedding')
         self.weights['entity_embedding'] = tf.Variable(initializer([self.n_entities - self.n_items, self.emb_dim]),
@@ -142,12 +162,15 @@ class KLGCN(AbstractRecommender):
             self.weights['relation_embedding'] = tf.Variable(initializer([self.n_relations, self.emb_dim]),
                                                              name='relation_embedding')
 
+
     def build_graph(self):
         self._create_variable()
         """
         LightGCN part
         """
-        ua_embeddings, ia_embeddings = self._create_lightgcn_embed()
+        ua_embeddings, ia_embeddings = self._create_ultragcn_embedding()
+        self.ia_embeddings = ia_embeddings
+        # ua_embeddings, ia_embeddings = self._create_lightgcn_embed()
         """
         KGNN part
         """
@@ -191,14 +214,11 @@ class KLGCN(AbstractRecommender):
 
             elif self.concat_type == 'rate':
                 if self.plus_user:
-                    self.user_embeddings = self.c_alpha * self.u_kg_embeddings + (
-                                1 - self.c_alpha) * self.u_g_embeddings
+                    self.user_embeddings = self.c_alpha * self.u_kg_embeddings + (1 - self.c_alpha) * self.u_g_embeddings
                 else:
                     self.user_embeddings = self.u_g_embeddings
-                self.pos_item_embeddings = self.c_alpha * self.pos_i_kg_embeddings + (
-                            1 - self.c_alpha) * self.pos_i_g_embeddings
-                self.neg_item_embeddings = self.c_alpha * self.neg_i_kg_embeddings + (
-                            1 - self.c_alpha) * self.neg_i_g_embeddings
+                self.pos_item_embeddings = self.c_alpha * self.pos_i_kg_embeddings + (1 - self.c_alpha) * self.pos_i_g_embeddings
+                self.neg_item_embeddings = self.c_alpha * self.neg_i_kg_embeddings + (1 - self.c_alpha) * self.neg_i_g_embeddings
 
             elif self.concat_type == 'add':
                 if self.plus_user:
@@ -209,17 +229,14 @@ class KLGCN(AbstractRecommender):
                 self.neg_item_embeddings = self.neg_i_kg_embeddings + self.neg_i_g_embeddings
 
             else:
-                raise ValueError('Unknown concat type ' + self.concat_type)
+                 raise ValueError('Unknown concat type ' + self.concat_type)
+
 
         """
         *********************************************************
         Generate Predictions & Optimize via BPR loss.
         """
-        self.pos_scores = inner_product(self.user_embeddings, self.pos_item_embeddings)
-        self.neg_scores = inner_product(self.user_embeddings, self.neg_item_embeddings)
-        self.pos_score_normalized = tf.sigmoid(self.pos_scores)
-        self.neg_score_normalized = tf.sigmoid(self.neg_scores)
-        self.mf_loss, self.ctr_loss, self.emb_loss = self.create_bpr_loss(self.pos_scores, self.neg_scores)
+        self.mf_loss, self.ctr_loss, self.emb_loss = self.create_bpr_loss()
 
         if self.loss_type == 'mf&ctr':
             self.loss = self.mf_loss + self.ctr_loss + self.emb_loss
@@ -246,7 +263,7 @@ class KLGCN(AbstractRecommender):
         all_embeddings = [ego_embeddings]
 
         for k in range(0, self.n_layers):
-            side_embeddings = tf.sparse.sparse_dense_matmul(adj_mat, ego_embeddings, name="sparse_dense")
+            side_embeddings = tf.sparse_tensor_dense_matmul(adj_mat, ego_embeddings, name="sparse_dense")
             ego_embeddings = side_embeddings
             all_embeddings += [ego_embeddings]
 
@@ -260,6 +277,7 @@ class KLGCN(AbstractRecommender):
         return tf.SparseTensor(indices, coo.data, coo.shape)
 
     def _create_kgcn_embed(self):
+        # neg_items = self.neg_items[:, 0]
         if self.add_user:
             pos_i_indices, neg_i_indices = self.pos_items + self.n_users, self.neg_items + self.n_users
         else:
@@ -282,10 +300,12 @@ class KLGCN(AbstractRecommender):
             user_embeddings, pos_item_embeddings, neg_item_embeddings = embeddings[0], embeddings[1], embeddings[2]
         else:
             embeddings = tf.reshape(embeddings, [2, -1, self.emb_dim])
-            user_embeddings, pos_item_embeddings, neg_item_embeddings = user_embeddings_pre, embeddings[0], embeddings[
-                1]
+            user_embeddings, pos_item_embeddings, neg_item_embeddings = user_embeddings_pre, embeddings[0], embeddings[1]
 
         return user_embeddings, pos_item_embeddings, neg_item_embeddings, aggregators
+
+    def _create_ultragcn_embedding(self):
+        return tf.expand_dims(self.weights['user_embedding'], axis=1), tf.expand_dims(self.weights['item_embedding'], axis=1)
 
     def get_neighbors(self, seeds, batch_size):
         seeds = tf.expand_dims(seeds, axis=1)
@@ -297,7 +317,7 @@ class KLGCN(AbstractRecommender):
             entities.append(neighbor_entities)
             relations.append(neighbor_relations)
         return entities, relations
-
+    
     def aggregate(self, entities, relations, user_embeddings, batch_size):
         aggregators = []  # store all aggregators
         if self.add_user:
@@ -333,8 +353,25 @@ class KLGCN(AbstractRecommender):
         res = tf.reshape(entity_vectors[0], [batch_size, self.emb_dim])
         return res, aggregators
 
-    def create_bpr_loss(self, pos_scores, neg_scores):
-        scores = tf.concat([pos_scores, neg_scores], axis=0)
+    def create_bpr_loss(self):
+        batch_neg_item_indices = tf.random.uniform(shape=[tf.shape(self.users)[0], 800], maxval=self.n_items, dtype=tf.int64)
+        batch_neg_item_embeddings = tf.squeeze(tf.nn.embedding_lookup(self.ia_embeddings, batch_neg_item_indices), axis=2)
+        pos_logits_u = inner_product(self.u_g_embeddings, self.pos_i_g_embeddings)
+        # neg_logits_u = inner_product(self.u_g_embeddings, self.neg_i_g_embeddings)
+        neg_logits_u = tf.reduce_sum(tf.expand_dims(self.u_g_embeddings, axis=1) * batch_neg_item_embeddings, axis=-1)
+        self.pos_scores = inner_product(self.user_embeddings, self.pos_item_embeddings)
+        self.neg_scores = inner_product(self.user_embeddings, self.neg_item_embeddings)
+        pos_logits_u = tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=pos_logits_u,
+            labels=tf.ones_like(pos_logits_u)
+        )
+        neg_logits_u = tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=neg_logits_u,
+            labels=tf.zeros_like(neg_logits_u)
+        )
+        self.pos_score_normalized = tf.sigmoid(self.pos_scores)
+        self.neg_score_normalized = tf.sigmoid(self.neg_scores)
+        scores = tf.concat([self.pos_scores, self.neg_scores], axis=0)
 
         regularizer = l2_loss(self.weights['user_embedding'], self.weights['item_embedding'],
                               self.weights['entity_embedding'], self.weights['relation_embedding'])
@@ -343,27 +380,48 @@ class KLGCN(AbstractRecommender):
             for aggregator in self.aggregators:
                 regularizer = regularizer + l2_loss(aggregator.weights)
 
-        mf_loss = tf.reduce_sum(log_loss(pos_scores - neg_scores))
+        batch_user_weights = tf.gather(self.constraint_mat, self.users)
+        pos_weights = tf.gather(batch_user_weights, self.pos_items, batch_dims=-1)
+        neg_weights = tf.gather(batch_user_weights, batch_neg_item_indices, batch_dims=-1)
+        mf_loss = pos_logits_u * (1e-6 + pos_weights) + tf.reduce_mean(neg_logits_u * (1e-6 + neg_weights), axis=1) * 300 + tf.reduce_sum(log_loss(self.pos_scores - self.neg_scores))
+        # mf_loss = pos_logits_u * (1e-6 + pos_weights) + tf.reduce_mean(neg_logits_u * (1e-6 + neg_weights), axis=1) * 300
         ctr_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=scores))
-
         emb_loss = self.reg * regularizer
 
-        return mf_loss, ctr_loss, emb_loss
+        return tf.reduce_sum(mf_loss), ctr_loss, emb_loss
+
+    # def create_bpr_loss(self):
+    #     self.pos_scores = inner_product(self.user_embeddings, self.pos_item_embeddings)
+    #     self.neg_scores = inner_product(self.user_embeddings, self.neg_item_embeddings)
+    #     scores = tf.concat([self.pos_scores, self.neg_scores], axis=0)
+    #
+    #     regularizer = l2_loss(self.weights['user_embedding'], self.weights['item_embedding'],
+    #                           self.weights['entity_embedding'], self.weights['relation_embedding'])
+    #     self.pos_score_normalized = tf.sigmoid(self.pos_scores)
+    #     self.neg_score_normalized = tf.sigmoid(self.neg_scores)
+    #     if self.feature_transform:
+    #         for aggregator in self.aggregators:
+    #             regularizer = regularizer + l2_loss(aggregator.weights)
+    #
+    #     mf_loss = tf.reduce_sum(log_loss(self.pos_scores - self.neg_scores))
+    #     ctr_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=scores))
+    #
+    #     emb_loss = self.reg * regularizer
+    #
+    #     return mf_loss, ctr_loss, emb_loss
 
     def train_model(self):
-
-        data_iter = PairwiseSampler(self.dataset, neg_num=1, batch_size=self.batch_size, shuffle=True,
-                                    user_pos_dict=self.user_pos_train)
-        test_iter = PairwiseSampler(self.dataset, neg_num=1, batch_size=self.batch_size, shuffle=True,
-                                    user_pos_dict=self.user_pos_test)
+    
+        data_iter = PairwiseSampler(self.dataset, neg_num=1, batch_size=self.batch_size, shuffle=True, user_pos_dict=self.user_pos_train)
+        test_iter = PairwiseSampler(self.dataset, neg_num=1, batch_size=self.batch_size, shuffle=True, user_pos_dict=self.user_pos_test)
         best_result, cur_epoch, cur_auc, cur_f1 = None, None, None, None
         step = 0
         for epoch in range(self.epochs):
             for bat_users, bat_pos_items, bat_neg_items in data_iter:
                 feed = {self.users: bat_users,
-                        self.pos_items: bat_pos_items,
-                        self.neg_items: bat_neg_items,
-                        self.labels: len(bat_pos_items) * [1] + len(bat_neg_items) * [0]}
+                          self.pos_items: bat_pos_items,
+                          self.neg_items: bat_neg_items,
+                          self.labels: len(bat_pos_items) * [1] + len(bat_neg_items) * [0]}
                 self.sess.run([self.opt], feed_dict=feed)
 
             auc_list, f1_list = [], []
@@ -412,6 +470,7 @@ class KLGCN(AbstractRecommender):
                 feed_dict = {self.users: [user] * len(items),
                              self.pos_items: items,
                              self.neg_items: items}
+                             # self.neg_items: np.expand_dims(np.array(items), axis=1),}
 
                 batch_ratings = self.sess.run(self.pos_scores, feed_dict=feed_dict)
                 ratings[idx][start: start + self.batch_size] = batch_ratings
