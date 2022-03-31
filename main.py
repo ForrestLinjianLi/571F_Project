@@ -8,8 +8,8 @@ from util import Configurator, tool
 
 np.random.seed(222)
 random.seed(222)
-tf.set_random_seed(222)
-# tf.random.set_seed(222)
+# tf.set_random_seed(222)
+tf.random.set_seed(222)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 if __name__ == "__main__":
@@ -23,10 +23,10 @@ if __name__ == "__main__":
     # if Tool.get_available_gpus(gpu_id):
     #     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
     dataset = Dataset(conf)
-    config = tf.ConfigProto()
+    config = tf.compat.v1.ConfigProto()
     config.gpu_options.allow_growth = True
     config.gpu_options.per_process_gpu_memory_fraction = conf["gpu_mem"]
-    with tf.Session(config=config) as sess:
+    with tf.compat.v1.Session(config=config) as sess:
         if importlib.util.find_spec("model.my_recommender." + recommender) is not None:
             my_module = importlib.import_module("model.my_recommender." + recommender)
 
@@ -44,5 +44,5 @@ if __name__ == "__main__":
         model = MyClass(sess, dataset, conf)
 
         model.build_graph()
-        sess.run(tf.global_variables_initializer())
+        sess.run(tf.compat.v1.global_variables_initializer())
         model.train_model()

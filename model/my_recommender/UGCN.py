@@ -79,8 +79,8 @@ class UGCN(AbstractRecommender):
     def get_constraint_mat(self):
         user_list, item_list = self.dataset.get_train_interactions()
 
-        row = np.array(user_list, dtype=np.float32)
-        col = np.array(item_list, dtype=np.float32)
+        row = np.array(user_list, dtype=np.int32)
+        col = np.array(item_list, dtype=np.int32)
 
         adj = sp.csr_matrix((np.ones_like(row, dtype=np.float32), (row, col)), shape=[self.n_users, self.n_items])
         user_deg = np.array(adj.sum(axis=1)).flatten()  # np.sum(adj, axis=1).reshape(-1)
@@ -96,13 +96,13 @@ class UGCN(AbstractRecommender):
 
     def _create_variable(self):
 
-        self.users = tf.placeholder(tf.int32, shape=(None,))
-        self.pos_items = tf.placeholder(tf.int32, shape=(None,))
-        self.neg_items = tf.placeholder(tf.int32, shape=(None,))
-        self.labels = tf.placeholder(tf.float32, shape=(None,))
+        self.users = tf.compat.v1.placeholder(tf.int32, shape=(None,))
+        self.pos_items = tf.compat.v1.placeholder(tf.int32, shape=(None,))
+        self.neg_items = tf.compat.v1.placeholder(tf.int32, shape=(None,))
+        self.labels = tf.compat.v1.placeholder(tf.float32, shape=(None,))
 
         self.weights = dict()
-        initializer = tf.contrib.layers.xavier_initializer()
+        initializer = tf.initializers.GlorotUniform()
         self.weights['user_embedding'] = tf.Variable(initializer([self.n_users, self.emb_dim]), name='user_embedding')
         self.weights['item_embedding'] = tf.Variable(initializer([self.n_items, self.emb_dim]), name='item_embedding')
         self.weights['entity_embedding'] = tf.Variable(initializer([self.n_entities - self.n_items, self.emb_dim]),
@@ -128,19 +128,39 @@ class UGCN(AbstractRecommender):
         self.u_g_embeddings = tf.nn.embedding_lookup(ua_embeddings, self.users)
         self.pos_i_g_embeddings = tf.nn.embedding_lookup(ia_embeddings, self.pos_items)
         self.neg_i_g_embeddings = tf.nn.embedding_lookup(ia_embeddings, self.neg_items)
+        self.i_g_embeddings = tf.nn.embedding_lookup(ia_embeddings, self.pos_items+self.neg_items)
+
+        # self.u_g_embeddings = tf.reduce_mean(self.u_g_embeddings, axis=1)
+        # self.pos_i_g_embeddings = tf.reduce_mean(self.pos_i_g_embeddings, axis=1)
+        # self.neg_i_g_embeddings = tf.reduce_mean(self.neg_i_g_embeddings, axis=1)
 
         """
         *********************************************************
         Generate Predictions & Optimize via BPR loss.
         """
-        self.mf_loss, self.emb_loss = self.create_bpr_loss()
+        # self.pos_scores = inner_product(self.u_g_embeddings, self.pos_i_g_embeddings)
+        self.pos_scores = inner_product(self.u_g_embeddings, self.i_g_embeddings)
+        self.neg_scores = inner_product(self.u_g_embeddings, self.neg_i_g_embeddings)
+        self.pos_score_normalized = tf.sigmoid(self.pos_scores)
+        self.neg_score_normalized = tf.sigmoid(self.neg_scores)
+        self.mf_loss, self.ctr_loss, self.emb_loss = self.create_bpr_loss(self.pos_scores, self.neg_scores)
 
-        if self.loss_type == 'mf':
+        if self.loss_type == 'mf&ctr':
+            self.loss = self.mf_loss + self.ctr_loss + self.emb_loss
+        elif self.loss_type == 'ctr':
+            self.loss = self.ctr_loss + self.emb_loss
+        elif self.loss_type == 'mf':
             self.loss = self.mf_loss + self.emb_loss
+        elif self.loss_type == 'cross':
+            if self.cur_epoch % 2 == 0:
+                self.loss = self.ctr_loss + self.emb_loss
+            else:
+                self.loss = self.mf_loss + self.emb_loss
+            self.cur_epoch += 1
         else:
             raise ValueError('Unknown loss type' + self.loss_type)
 
-        self.opt = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss)
+        self.opt = tf.compat.v1.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss)
 
     def _create_ultragcn_embedding(self):
         return tf.expand_dims(self.weights['user_embedding'], axis=1), tf.expand_dims(self.weights['item_embedding'], axis=1)
@@ -150,49 +170,41 @@ class UGCN(AbstractRecommender):
         indices = np.mat([coo.row, coo.col]).transpose()
         return tf.SparseTensor(indices, coo.data, coo.shape)
 
-    def create_bpr_loss(self):
-        batch_neg_item_indices = tf.random.uniform(shape=[tf.shape(self.users)[0], 800], maxval=self.n_items,
-                                                   dtype=tf.int64)
-
-        batch_user_weights = tf.gather(self.constraint_mat, self.users)
-        pos_weights = tf.gather(batch_user_weights, self.pos_items, batch_dims=-1)
-        neg_weights = tf.gather(batch_user_weights, batch_neg_item_indices, batch_dims=-1)
-
-        embedded_neg_items = tf.squeeze(tf.nn.embedding_lookup(self.ia_embeddings, batch_neg_item_indices), axis=2)
-        pos_logits = tf.reduce_sum(self.u_g_embeddings * self.pos_i_g_embeddings, axis=-1)
-        neg_logits = tf.reduce_sum((tf.expand_dims(self.u_g_embeddings, axis=1) * embedded_neg_items), axis=-1)
-
-        pos_losses = tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=pos_logits,
-            labels=tf.ones_like(pos_logits)
-        )
-        neg_losses = tf.nn.sigmoid_cross_entropy_with_logits(
-            logits=neg_logits,
-            labels=tf.zeros_like(neg_logits)
-        )
-
-        # mf_loss = pos_logits_u * (1e-6 + pos_weights) + tf.reduce_mean(neg_logits_u * (1e-6 + neg_weights), axis=1) * 300
-        # mf_loss = pos_losses * (1e-6 + pos_weights) + tf.reduce_mean(neg_losses * (1e-6 + neg_weights),axis=1) * 300\
-        #           + tf.reduce_sum(log_loss(self.pos_scores - self.neg_scores))
-        mf_loss = pos_losses * (1e-6 + pos_weights) + tf.reduce_mean(neg_losses * (1e-6 + neg_weights), axis=1) * 300
-
-        self.pos_scores = inner_product(self.u_g_embeddings, self.pos_i_g_embeddings)
-        self.neg_scores = inner_product(self.u_g_embeddings, self.neg_i_g_embeddings)
-        self.pos_score_normalized = tf.sigmoid(self.pos_scores)
-        self.neg_score_normalized = tf.sigmoid(self.neg_scores)
-        # scores = tf.concat([pos_logits, neg_losses], axis=0)
+    def create_bpr_loss(self, pos_scores, neg_scores):
+        scores = tf.concat([pos_scores, neg_scores], axis=0)
         regularizer = l2_loss(self.weights['user_embedding'], self.weights['item_embedding'],
                               self.weights['entity_embedding'], self.weights['relation_embedding'])
         if self.feature_transform:
             for aggregator in self.aggregators:
                 regularizer = regularizer + l2_loss(aggregator.weights)
 
+        batch_neg_item_indices = tf.random.uniform(shape=[tf.shape(self.users)[0], 800], maxval=self.n_items,
+                                                   dtype=tf.int64)
+        batch_neg_item_embeddings = tf.reduce_mean(tf.nn.embedding_lookup(self.ia_embeddings, batch_neg_item_indices),
+                                                   axis=2)
+        neg_logits_u = tf.reduce_sum(tf.expand_dims(self.u_g_embeddings, axis=1) * batch_neg_item_embeddings, axis=-1)
+        pos_logits_u = tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=pos_scores,
+            labels=tf.ones_like(pos_scores)
+        )
+        neg_logits_u = tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=neg_logits_u,
+            labels=tf.zeros_like(neg_logits_u)
+        )
+        batch_user_weights = tf.gather(self.constraint_mat, self.users)
+        # pos_weights = tf.gather(batch_user_weights, self.pos_items, batch_dims=1)
+        pos_weights = tf.gather(batch_user_weights, self.pos_items+self.neg_items, batch_dims=1)
+        neg_weights = tf.gather(batch_user_weights, batch_neg_item_indices, batch_dims=1)
+
+        mf_loss = pos_logits_u * (1e-6 + pos_weights) + tf.reduce_mean(neg_logits_u * (1e-6 + neg_weights), axis=1) * 300
         # ctr_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=scores))
+        ctr_loss = 0
         emb_loss = self.reg * regularizer
 
-        return tf.reduce_sum(mf_loss), emb_loss
+        return tf.reduce_sum(mf_loss), ctr_loss, emb_loss
 
     def train_model(self):
+
         data_iter = PairwiseSampler(self.dataset, neg_num=1, batch_size=self.batch_size, shuffle=True,
                                     user_pos_dict=self.user_pos_train)
         test_iter = PairwiseSampler(self.dataset, neg_num=1, batch_size=self.batch_size, shuffle=True,
@@ -253,7 +265,6 @@ class UGCN(AbstractRecommender):
                 feed_dict = {self.users: [user] * len(items),
                              self.pos_items: items,
                              self.neg_items: items}
-                # self.neg_items: np.expand_dims(np.array(items), axis=1),}
 
                 batch_ratings = self.sess.run(self.pos_scores, feed_dict=feed_dict)
                 ratings[idx][start: start + self.batch_size] = batch_ratings
