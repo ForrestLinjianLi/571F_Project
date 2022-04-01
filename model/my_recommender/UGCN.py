@@ -13,11 +13,10 @@ from util import learner
 from util import l2_loss, inner_product, log_loss
 from util import get_info
 from util import SumAggregator, ConcatAggregator, NeighborAggregator, TopAggregator, DiAggregator
-
-from code.model.my_recommender.embedding import Embedding
 from data import PairwiseSampler
 from sklearn.metrics import f1_score, roc_auc_score
-from time import time
+import time
+
 
 class UGCN(AbstractRecommender):
     def __init__(self, sess, dataset, config):
@@ -96,130 +95,78 @@ class UGCN(AbstractRecommender):
         return constraint_mat
 
     def _create_variable(self):
-
-        # self.users = tf.compat.v1.placeholder(tf.int32, shape=(None,))
-        # self.pos_items = tf.compat.v1.placeholder(tf.int32, shape=(None,))
-        # self.neg_items = tf.compat.v1.placeholder(tf.int32, shape=(None,))
-        # self.labels = tf.compat.v1.placeholder(tf.float32, shape=(None,))
+        self.users = tf.compat.v1.placeholder(tf.int32, shape=(None,))
+        self.pos_items = tf.compat.v1.placeholder(tf.int32, shape=(None,))
+        self.neg_items = tf.compat.v1.placeholder(tf.int32, shape=(None,))
+        self.labels = tf.compat.v1.placeholder(tf.float32, shape=(None,))
 
         self.weights = dict()
         initializer = tf.initializers.GlorotUniform()
-        self.weights['user_embedding'] = Embedding(self.n_users, embedding_size=self.emb_dim,
-                                                   initializer=initializer,
-                                                   name="user_embedding")
-        self.weights['item_embedding'] = Embedding(self.n_items, embedding_size=self.emb_dim,
-                                                   initializer=initializer,
-                                                   name="user_embedding")
-        self.weights['entity_embedding'] = tf.Variable(initializer([self.n_entities - self.n_items, self.emb_dim]),
-                                                       name='entity_embedding')  # except all items
-        if self.reverse:
-            self.weights['relation_embedding'] = tf.Variable(initializer([(self.n_relations + 1) * 2, self.emb_dim]),
-                                                             name='relation_embedding')
-        else:
-            self.weights['relation_embedding'] = tf.Variable(initializer([self.n_relations, self.emb_dim]),
-                                                             name='relation_embedding')
+        self.weights['user_embedding'] = tf.Variable(initializer([self.n_users, self.emb_dim]), name='user_embedding')
+        self.weights['item_embedding'] = tf.Variable(initializer([self.n_items, self.emb_dim]), name='item_embedding')
 
     def build_graph(self):
         self._create_variable()
-        self.opt = tf.keras.optimizers.Adam(learning_rate=self.lr)
-        ua_embeddings, ia_embeddings = self._create_ultragcn_embedding()
-        self.ia_embeddings = ia_embeddings
-        """
-        *********************************************************
-        Establish the final representations for user-item pairs in batch.
-        """
+        ua_embeddings, self.ia_embeddings = tf.expand_dims(self.weights['user_embedding'], axis=1), tf.expand_dims(
+            self.weights['item_embedding'], axis=1)
+
         self.u_g_embeddings = tf.nn.embedding_lookup(ua_embeddings, self.users)
-        self.pos_i_g_embeddings = tf.nn.embedding_lookup(ia_embeddings, self.pos_items)
-        self.neg_i_g_embeddings = tf.nn.embedding_lookup(ia_embeddings, self.neg_items)
+        self.pos_i_g_embeddings = tf.nn.embedding_lookup(self.ia_embeddings, self.pos_items)
+        self.neg_i_g_embeddings = tf.nn.embedding_lookup(self.ia_embeddings, self.neg_items)
 
         self.u_g_embeddings = tf.reduce_mean(self.u_g_embeddings, axis=1)
         self.pos_i_g_embeddings = tf.reduce_mean(self.pos_i_g_embeddings, axis=1)
         self.neg_i_g_embeddings = tf.reduce_mean(self.neg_i_g_embeddings, axis=1)
 
-    def train(self, users, pos_items, neg_items, labels):
-        """
-        LightGCN part
-        """
-        self.users = users
-        self.pos_items = pos_items
-        self.neg_items = neg_items
-        self.labels = labels
-
-        """
-        *********************************************************
-        Generate Predictions & Optimize via BPR loss.
-        """
-        # self.pos_scores = inner_product(self.u_g_embeddings, self.pos_i_g_embeddings)
         self.pos_scores = inner_product(self.u_g_embeddings, self.pos_i_g_embeddings)
         self.neg_scores = inner_product(self.u_g_embeddings, self.neg_i_g_embeddings)
         self.pos_score_normalized = tf.sigmoid(self.pos_scores)
         self.neg_score_normalized = tf.sigmoid(self.neg_scores)
-        mf_loss, ctr_loss, emb_loss = self.create_bpr_loss(self.pos_scores, self.neg_scores)
+        self.mf_loss, self.ctr_loss, self.emb_loss = self.create_bpr_loss(self.pos_scores, self.neg_scores)
 
-        # if self.loss_type == 'mf&ctr':
-        #     self.loss = self.mf_loss + self.ctr_loss + self.emb_loss
-        # elif self.loss_type == 'ctr':
-        #     self.loss = self.ctr_loss + self.emb_loss
-        # elif self.loss_type == 'mf':
-        #     self.loss = self.mf_loss + self.emb_loss
-        # elif self.loss_type == 'cross':
-        #     if self.cur_epoch % 2 == 0:
-        #         self.loss = self.ctr_loss + self.emb_loss
-        #     else:
-        #         self.loss = self.mf_loss + self.emb_loss
-        #     self.cur_epoch += 1
-        # else:
-        #     raise ValueError('Unknown loss type' + self.loss_type)
+        if self.loss_type == 'mf&ctr':
+            self.loss = self.mf_loss + self.ctr_loss + self.emb_loss
+        elif self.loss_type == 'ctr':
+            self.loss = self.ctr_loss + self.emb_loss
+        elif self.loss_type == 'mf':
+            self.loss = self.mf_loss + self.emb_loss
+        elif self.loss_type == 'cross':
+            if self.cur_epoch % 2 == 0:
+                self.loss = self.ctr_loss + self.emb_loss
+            else:
+                self.loss = self.mf_loss + self.emb_loss
+            self.cur_epoch += 1
+        else:
+            raise ValueError('Unknown loss type' + self.loss_type)
 
-        return mf_loss, emb_loss
-
-
-
-    def _create_ultragcn_embedding(self):
-        return tf.expand_dims(self.weights['user_embedding'], axis=1), tf.expand_dims(self.weights['item_embedding'], axis=1)
-
-    def _convert_sp_mat_to_sp_tensor(self, X):
-        coo = X.tocoo().astype(np.float32)
-        indices = np.mat([coo.row, coo.col]).transpose()
-        return tf.SparseTensor(indices, coo.data, coo.shape)
+        self.opt = tf.compat.v1.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss)
 
     def create_bpr_loss(self, pos_scores, neg_scores):
         scores = tf.concat([pos_scores, neg_scores], axis=0)
         regularizer = l2_loss(self.weights['user_embedding'], self.weights['item_embedding'])
-        if self.feature_transform:
-            for aggregator in self.aggregators:
-                regularizer = regularizer + l2_loss(aggregator.weights)
 
-        batch_neg_item_indices = tf.random.uniform(shape=[tf.shape(self.users)[0], 800], maxval=self.n_items,
+        batch_neg_item_indices = tf.random.uniform(shape=[tf.shape(self.users)[0], 300], maxval=self.n_items,
                                                    dtype=tf.int64)
         batch_neg_item_embeddings = tf.reduce_mean(tf.nn.embedding_lookup(self.ia_embeddings, batch_neg_item_indices),
                                                    axis=2)
         batch_user_weights = tf.gather(self.constraint_mat, self.users)
-        # pos_weights = tf.gather(batch_user_weights, self.pos_items, batch_dims=1)
         pos_weights = tf.gather(batch_user_weights, self.pos_items, batch_dims=1)
         neg_weights = tf.gather(batch_user_weights, batch_neg_item_indices, batch_dims=1)
-        with tf.GradientTape() as tape:
-            neg_logits_u = tf.reduce_sum(tf.expand_dims(self.u_g_embeddings, axis=1) * batch_neg_item_embeddings, axis=-1)
-            pos_logits_u = tf.nn.sigmoid_cross_entropy_with_logits(
-                logits=pos_scores,
-                labels=tf.ones_like(pos_scores)
-            )
-            neg_logits_u = tf.nn.sigmoid_cross_entropy_with_logits(
-                logits=neg_logits_u,
-                labels=tf.zeros_like(neg_logits_u)
-            )
+        batch_neg_scores = \
+            tf.reduce_sum(tf.expand_dims(self.u_g_embeddings, axis=1) * batch_neg_item_embeddings, axis=-1)
+        pos_logits = tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=pos_scores,
+            labels=tf.ones_like(pos_scores)
+        )
+        neg_logits = tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=batch_neg_scores,
+            labels=tf.zeros_like(batch_neg_scores)
+        )
+        mf_loss = pos_logits * (1 + pos_weights) + tf.reduce_mean(neg_logits * (1 + neg_weights), axis=1) * 300
+        ctr_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=scores))
+        emb_loss = self.reg * regularizer
 
-            mf_loss = pos_logits_u * (1e-6 + pos_weights) + tf.reduce_mean(neg_logits_u * (1e-6 + neg_weights), axis=1) * 300
-            mf_loss = tf.reduce_sum(mf_loss)
-            # ctr_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.labels, logits=scores))
-            ctr_loss = 0
-            emb_loss = self.reg * regularizer
-
-        vars = tape.watched_variables()
-        grads = tape.gradient(mf_loss+emb_loss, vars)
-        self.opt.apply_gradients(zip(grads, vars))
-
-        return mf_loss, ctr_loss, emb_loss
+        return tf.reduce_sum(mf_loss), ctr_loss, emb_loss
 
     def train_model(self):
         data_iter = PairwiseSampler(self.dataset, neg_num=1, batch_size=self.batch_size, shuffle=True,
@@ -229,65 +176,45 @@ class UGCN(AbstractRecommender):
         best_result, cur_epoch, cur_auc, cur_f1 = None, None, None, None
         step = 0
         for epoch in range(self.epochs):
-            step_losses = []
-            step_mf_losses_list = []
-            step_l2_losses = []
-            start_time = time()
             for bat_users, bat_pos_items, bat_neg_items in data_iter:
-                # feed = {self.users: bat_users,
-                #         self.pos_items: bat_pos_items,
-                #         self.neg_items: bat_neg_items,
-                #         self.labels: len(bat_pos_items) * [1] + len(bat_neg_items) * [0]}
-                # self.sess.run([self.opt], feed_dict=feed)
-                mf_losses, l2_loss = self.train(bat_users, bat_pos_items, bat_neg_items, len(bat_pos_items) * [1] + len(bat_neg_items) * [0])
-                step_mf_losses_list.append(np.array(mf_losses))
-                step_l2_losses.append(np.array(l2_loss))
-            end_time = time()
-            # auc_list, f1_list = [], []
-            # for bat_users, bat_pos_items, bat_neg_items in test_iter:
-            #     feed = {self.users: bat_users,
-            #             self.pos_items: bat_pos_items,
-            #             self.neg_items: bat_neg_items}
-            #     auc, f1 = self.ctr_eval(feed)
-            #     auc_list.append(auc)
-            #     f1_list.append(f1)
-            # final_auc, final_f1 = float(np.mean(auc_list)), float(np.mean(f1_list))
-            # result = self.evaluate_model(self.test_users)
-            #
-            # info = get_info(result, epoch, final_auc, final_f1)
-            # self.logger.info(info)
-            #
-            # if not best_result or result['Recall'][0] > best_result['Recall'][0]:
-            #     best_result, cur_epoch, cur_auc, cur_f1 = result, epoch, final_auc, final_f1
-            #     step = 0
-            # else:
-            #     step += 1
-            #
-            # if self.dataset.dataset_name in ['movie', 'restaurant', 'yelp2018']:
-            #     if step >= 10 or epoch == self.epochs - 1:
-            #         info = get_info(best_result, cur_epoch, cur_auc, cur_f1)
-            #         self.logger.info('-' * 27 + ' BEST RESULT ' + '-' * 27)
-            #         self.logger.info(info)
-            #         break
-            # else:
-            #     if epoch == self.epochs - 1:
-            #         info = get_info(best_result, cur_epoch, cur_auc, cur_f1)
-            #         self.logger.info('-' * 27 + ' BEST RESULT ' + '-' * 27)
-            #         self.logger.info(info)
-            #         break
+                feed = {self.users: bat_users,
+                        self.pos_items: bat_pos_items,
+                        self.neg_items: bat_neg_items,
+                        self.labels: len(bat_pos_items) * [1] + len(bat_neg_items) * [0]}
+                self.sess.run([self.opt], feed_dict=feed)
 
-            if np.array(self.opt.learning_rate) > 1e-5:
-                self.opt.learning_rate.assign(self.opt.learning_rate * 0.995)
-                lr_status = "update lr => {:.4f}".format(np.array(self.opt.learning_rate))
+            auc_list, f1_list = [], []
+            for bat_users, bat_pos_items, bat_neg_items in test_iter:
+                feed = {self.users: bat_users,
+                        self.pos_items: bat_pos_items,
+                        self.neg_items: bat_neg_items}
+                auc, f1 = self.ctr_eval(feed)
+                auc_list.append(auc)
+                f1_list.append(f1)
+            final_auc, final_f1 = float(np.mean(auc_list)), float(np.mean(f1_list))
+            result = self.evaluate_model(self.test_users)
+
+            info = get_info(result, epoch, final_auc, final_f1)
+            self.logger.info(info)
+
+            if not best_result or result['Recall'][0] > best_result['Recall'][0]:
+                best_result, cur_epoch, cur_auc, cur_f1 = result, epoch, final_auc, final_f1
+                step = 0
             else:
-                lr_status = "current lr => {:.4f}".format(np.array(self.opt.learning_rate))
+                step += 1
 
-            print("epoch = {}\tloss = {:.4f}\tmf_loss = {:.4f}\tl2_loss = {:.4f}\t{}\tepoch_time = {:.4f}s".format(
-                epoch, np.mean(step_losses), np.mean(np.concatenate(step_mf_losses_list, axis=0)),
-                np.mean(step_l2_losses), lr_status, end_time - start_time))
-
-            if epoch == 1:
-                print("the first epoch may take a long time to compile tf.function")
+            if self.dataset.dataset_name in ['movie', 'restaurant', 'yelp2018']:
+                if step >= 10 or epoch == self.epochs - 1:
+                    info = get_info(best_result, cur_epoch, cur_auc, cur_f1)
+                    self.logger.info('-' * 27 + ' BEST RESULT ' + '-' * 27)
+                    self.logger.info(info)
+                    break
+            else:
+                if epoch == self.epochs - 1:
+                    info = get_info(best_result, cur_epoch, cur_auc, cur_f1)
+                    self.logger.info('-' * 27 + ' BEST RESULT ' + '-' * 27)
+                    self.logger.info(info)
+                    break
 
     # @timer
     def evaluate_model(self, users):

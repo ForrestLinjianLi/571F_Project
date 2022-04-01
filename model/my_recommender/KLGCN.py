@@ -128,6 +128,20 @@ class KLGCN(AbstractRecommender):
         self.pos_items = tf.compat.v1.placeholder(tf.int32, shape=(None,))
         self.neg_items = tf.compat.v1.placeholder(tf.int32, shape=(None,))
         self.labels = tf.compat.v1.placeholder(tf.float32, shape=(None,))
+        self.query_attention = tf.compat.v1.placeholder(tf.int32, shape=(None,))
+
+        # query_input = tf.keras.Input(shape=(None,), dtype='int32')
+        # value_input = tf.keras.Input(shape=(None,), dtype='int32')
+        # max_tokens = 100
+        # dimension = 32
+        # token_embedding = tf.keras.layers.Embedding(max_tokens, dimension)
+        # value_embeddings = token_embedding(value_input)
+        # cnn_layer = tf.keras.layers.Conv1D(filters=100, kernel_size=4, padding='same')
+        # query_seq_encoding = cnn_layer(query_embeddings)
+        # value_seq_encoding = cnn_layer(value_embeddings)
+        # query_value_attention_seq = tf.keras.layers.Attention()([query_seq_encoding, value_seq_encodiencoding])
+        # query_value_attention = tf.keras.layers.GlobalAveragePooling1D()(query_value_attention_seq)
+        # model = tf.keras.Model(inputs=[query_input, value_input], outputs=query_value_attention)
 
         self.weights = dict()
         initializer = tf.initializers.GlorotUniform()
@@ -135,6 +149,7 @@ class KLGCN(AbstractRecommender):
         self.weights['item_embedding'] = tf.Variable(initializer([self.n_items, self.emb_dim]), name='item_embedding')
         self.weights['entity_embedding'] = tf.Variable(initializer([self.n_entities - self.n_items, self.emb_dim]),
                                                        name='entity_embedding')  # except all items
+        self.attention_weights = tf.Variable(initializer([self.emb_dim, ]), name='attention_weights')
         if self.reverse:
             self.weights['relation_embedding'] = tf.Variable(initializer([(self.n_relations + 1) * 2, self.emb_dim]),
                                                              name='relation_embedding')
@@ -166,19 +181,19 @@ class KLGCN(AbstractRecommender):
                 self.user_embeddings = tf.concat([self.u_g_embeddings, self.u_kg_embeddings], axis=1)
             else:
                 self.user_embeddings = self.u_g_embeddings
-            self.user_embeddings = tf.reduce_mean(self.user_embeddings, axis=1)
+            self.user_embeddings = self._aggragate_lgc(self.user_embeddings)
 
             self.pos_i_kg_embeddings = tf.expand_dims(self.pos_i_kg_embeddings, axis=1)
             self.pos_item_embeddings = tf.concat([self.pos_i_g_embeddings, self.pos_i_kg_embeddings], axis=1)
-            self.pos_item_embeddings = tf.reduce_mean(self.pos_item_embeddings, axis=1)
+            self.pos_item_embeddings = self._aggragate_lgc(self.pos_item_embeddings)
 
             self.neg_i_kg_embeddings = tf.expand_dims(self.neg_i_kg_embeddings, axis=1)
             self.neg_item_embeddings = tf.concat([self.neg_i_g_embeddings, self.neg_i_kg_embeddings], axis=1)
-            self.neg_item_embeddings = tf.reduce_mean(self.neg_item_embeddings, axis=1)
+            self.neg_item_embeddings = self._aggragate_lgc(self.neg_item_embeddings)
         else:
-            self.u_g_embeddings = tf.reduce_mean(self.u_g_embeddings, axis=1)
-            self.pos_i_g_embeddings = tf.reduce_mean(self.pos_i_g_embeddings, axis=1)
-            self.neg_i_g_embeddings = tf.reduce_mean(self.neg_i_g_embeddings, axis=1)
+            self.u_g_embeddings = self._aggragate_lgc(self.u_g_embeddings)
+            self.pos_i_g_embeddings = self._aggragate_lgc(self.pos_i_g_embeddings)
+            self.neg_i_g_embeddings = self._aggragate_lgc(self.neg_i_g_embeddings)
 
             if self.concat_type == 'concat':
                 if self.plus_user:
@@ -253,6 +268,10 @@ class KLGCN(AbstractRecommender):
         all_embeddings = tf.stack(all_embeddings, 1)
         u_g_embeddings, i_g_embeddings = tf.split(all_embeddings, [self.n_users, self.n_items], 0)
         return u_g_embeddings, i_g_embeddings
+
+    def _aggragate_lgc(self, embeddings):
+        weights = tf.nn.softmax(tf.linalg.matvec(embeddings,self.attention_weights))
+        return tf.linalg.matvec(tf.transpose(embeddings, perm=[0,2,1]), weights)
 
     def _convert_sp_mat_to_sp_tensor(self, X):
         coo = X.tocoo().astype(np.float32)
